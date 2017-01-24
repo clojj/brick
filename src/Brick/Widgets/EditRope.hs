@@ -149,9 +149,11 @@ renderEditor foc e =
         cp = e^.cursorPosL
         
         -- TODO toLeft = Z.take (cp^._2) (Z.currentLine z)
-        toLeft = Y.fromString "toLeft"
+        toLeft = Y.fromString "edit1"
         
-        cursorLoc = Location (textWidth toLeft, cp^._1)
+        -- TODO cursorLoc = Location (textWidth toLeft, cp^._1)
+        cursorLoc = Location cp
+        
         atChar = charAtCursor $ e^.editContentsL
         atCharWidth = maybe 1 textWidth atChar
     in withAttr (if foc then editFocusedAttr else editAttr) $
@@ -163,7 +165,7 @@ renderEditor foc e =
 
 charAtCursor :: Y.YiString -> Maybe Y.YiString
 charAtCursor z =
-    Just "X"
+    Just "e"
     -- TODO
     -- let col = snd $ Z.cursorPosition z
     --     curLine = Z.currentLine z
