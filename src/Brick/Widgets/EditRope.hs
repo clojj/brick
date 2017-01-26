@@ -21,6 +21,7 @@ module Brick.Widgets.EditRope
   , handleEditorEvent
   -- * Editing text
   , applyEdit
+  , applyComposed
   -- * Lenses for working with editors
   , editContentsL
   , editDrawContentsL
@@ -34,8 +35,9 @@ where
 
 import Data.Monoid
 import Lens.Micro
-import Graphics.Vty (Event(..), Key(..), Modifier(..))
+import Graphics.Vty (Event(..), Key(..))
 
+import Data.List
 import qualified Yi.Rope as Y
 import qualified Graphics.Vty as V
 
@@ -65,39 +67,64 @@ data Editor n =
 
 suffixLenses ''Editor
 
+-- TODO orphane instance !
 instance TextWidth Y.YiString where
   textWidth = V.wcswidth . Y.toString
   
 instance (Show n) => Show (Editor n) where
     show e =
         concat [ "Editor { "
-               , "editContents = " <> show (editContents e)
+               , "editContents = " <> show ((Y.toString.editContents) e)
                , ", editorName = " <> show (editorName e)
+               , ", cursorPos = " <> show (cursorPos e)
                , "}"
                ]
 
 instance Named (Editor n) n where
     getName = editorName
 
+moveColumn :: Int -> (Int, Int) -> (Int, Int)
+moveColumn d (c, l) = (c + d, l)
+  
+moveC :: Int -> (Editor n -> Editor n)  
+moveC d = cursorPosL %~ moveColumn d
+
+moveLine :: Int -> (Int, Int) -> (Int, Int)
+moveLine d (c, l) = (c, l + d)
+
+moveL :: Int -> (Editor n -> Editor n)
+moveL d = cursorPosL %~ moveLine d
+
+insertChar :: (Int, Int) -> Char -> (Y.YiString -> Y.YiString)
+insertChar (c, l) ch s = 
+  let (lBefore, lAfter) = Y.splitAtLine l s
+      (cBefore, cAfter) = Y.splitAt c lAfter
+  in lBefore <> (cBefore <> Y.cons ch cAfter)
+
+insertCh :: (Int, Int) -> Char -> (Editor n -> Editor n)
+insertCh cp ch = editContentsL %~ insertChar cp ch
+
 handleEditorEvent :: Event -> Editor n -> EventM n (Editor n)
 handleEditorEvent e ed =
-        let move d = \(x, y) -> (x + d, y)
-            (f, m) = case e of
+        let cp = ed ^. cursorPosL
+            fs = case e of
                   -- EvKey (KChar 'a') [MCtrl] -> Z.gotoBOL
                   -- EvKey (KChar 'e') [MCtrl] -> Z.gotoEOL
                   -- EvKey (KChar 'd') [MCtrl] -> Z.deleteChar
                   -- EvKey (KChar 'k') [MCtrl] -> Z.killToEOL
                   -- EvKey (KChar 'u') [MCtrl] -> Z.killToBOL
-                  -- EvKey KEnter [] -> Z.breakLine
+                  EvKey KEnter [] -> [insertCh cp '\n', moveL 1]
                   -- EvKey KDel [] -> Z.deleteChar
-                  EvKey (KChar c) [] | c /= '\t' -> (Y.cons c, id) -- TODO insert at cursorPosL
-                  -- EvKey KUp [] -> Z.moveUp
-                  -- EvKey KDown [] -> Z.moveDown
-                  EvKey KLeft [] -> (id, move (-1)) -- Z.moveLeft
-                  EvKey KRight [] -> (id, move 1) -- Z.moveRight
+                  EvKey (KChar c) [] | c /= '\t' -> [insertCh cp c, moveC 1]
+                  EvKey KUp [] -> [moveL (-1)]
+                  EvKey KDown [] -> [moveL 1]
+                  EvKey KLeft [] -> [moveC (-1)]
+                  EvKey KRight [] -> [moveC 1]
                   -- EvKey KBS [] -> Z.deletePrevChar
-                  _ -> (id, id)
-        in return $ applyEdit f m ed
+                  
+                  _ -> []
+        
+        in return $ applyComposed fs ed
 
 -- | Construct an editor over 'String' values
 editor ::
@@ -110,16 +137,19 @@ editor ::
        -> Editor n
 editor name draw s = Editor s draw name (0, 0)
 
+applyComposed :: [Editor n -> Editor n] -> Editor n -> Editor n
+applyComposed fs ed = foldl' (&) ed fs
+ 
 -- | Apply an editing operation to the editor's contents. Bear in mind
 -- that you should only apply operations that operate on the
 -- current line; the editor will only ever render the first line of
 -- text.
-applyEdit :: (Y.YiString -> Y.YiString)
+applyEdit :: 
           -- ^ The editing transformation to apply
-          -> ((Int, Int) -> (Int, Int))
+          (Y.YiString -> Y.YiString)
           -> Editor n
           -> Editor n
-applyEdit f m e = (e & cursorPosL %~ m) & editContentsL %~ f
+applyEdit f e = e & editContentsL %~ f
 
 -- | The attribute assigned to the editor when it does not have focus.
 editAttr :: AttrName
@@ -145,16 +175,9 @@ renderEditor :: (Ord n, Show n)
              -- ^ The editor.
              -> Widget n
 renderEditor foc e =
-    let z = e^.editContentsL
-        cp = e^.cursorPosL
-        
-        -- TODO toLeft = Z.take (cp^._2) (Z.currentLine z)
-        toLeft = Y.fromString "edit1"
-        
-        -- TODO cursorLoc = Location (textWidth toLeft, cp^._1)
+    let cp = e^.cursorPosL
         cursorLoc = Location cp
-        
-        atChar = charAtCursor $ e^.editContentsL
+        atChar = charAtCursor cp $ e ^. editContentsL
         atCharWidth = maybe 1 textWidth atChar
     in withAttr (if foc then editFocusedAttr else editAttr) $
        viewport (e^.editorNameL) Both $
@@ -163,10 +186,10 @@ renderEditor foc e =
        visibleRegion cursorLoc (atCharWidth, 1) $
        e^.editDrawContentsL $ getEditContents e
 
-charAtCursor :: Y.YiString -> Maybe Y.YiString
-charAtCursor z =
-    Just "e"
-    -- TODO
+charAtCursor :: (Int, Int) -> Y.YiString -> Maybe Y.YiString
+charAtCursor (c, l) s =
+    Just "X" -- TODO what is the role of textWidth ? for variable-width fonts ?
+    
     -- let col = snd $ Z.cursorPosition z
     --     curLine = Z.currentLine z
     --     toRight = Z.drop col curLine

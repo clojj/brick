@@ -65,6 +65,7 @@ appEvent st _ = M.continue st
 initialState :: St
 initialState =
     St (F.focusRing [Edit1, Edit2])
+       -- TODO build yiStr function for rendering Y.YiString
        (E.editor Edit1 (str . Y.toString) "edit1")
        (E.editor Edit2 (str . Y.toString) "edit2")
 
