@@ -343,7 +343,9 @@ our events over that channel. Once we've created the channel with
    main :: IO ()
    main = do
        eventChan <- Brick.BChan.newBChan 10
-       finalState <- customMain (Graphics.Vty.mkVty Data.Default.def) (Just eventChan) app initialState
+       finalState <- customMain
+                       (Graphics.Vty.mkVty Data.Default.defaultConfig)
+                       (Just eventChan) app initialState
        -- Use finalState and exit
 
 The ``customMain`` function lets us have control over how the ``vty``

@@ -51,7 +51,6 @@ import Control.Concurrent (forkIO, killThread)
 import Control.Applicative ((<$>))
 import Data.Monoid (mempty)
 #endif
-import Data.Default
 import Data.Maybe (listToMaybe)
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -66,7 +65,9 @@ import Graphics.Vty
   , shutdown
   , nextEvent
   , mkVty
+  , defaultConfig
   )
+import Graphics.Vty.Attributes (defAttr)
 
 import Brick.BChan (BChan, newBChan, readBChan, readBChan2, writeBChan)
 import Brick.Types (Widget, EventM(..))
@@ -119,7 +120,7 @@ defaultMain :: (Ord n)
             -- ^ The initial application state.
             -> IO s
 defaultMain app st = do
-    customMain (mkVty def) Nothing app st
+    customMain (mkVty defaultConfig) Nothing app st
 
 -- | A simple main entry point which takes a widget and renders it. This
 -- event loop terminates when the user presses any key, but terminal
@@ -132,7 +133,7 @@ simpleMain w =
     let app = App { appDraw = const [w]
                   , appHandleEvent = resizeOrQuit
                   , appStartEvent = return
-                  , appAttrMap = def
+                  , appAttrMap = const $ attrMap defAttr []
                   , appChooseCursor = neverShowCursor
                   }
     in defaultMain app ()

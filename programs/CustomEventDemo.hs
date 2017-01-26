@@ -6,7 +6,6 @@ import Lens.Micro ((^.), (&), (.~), (%~))
 import Lens.Micro.TH (makeLenses)
 import Control.Monad (void, forever)
 import Control.Concurrent (threadDelay, forkIO)
-import Data.Default
 import Data.Monoid
 import qualified Graphics.Vty as V
 
@@ -17,6 +16,9 @@ import Brick.Main
   , customMain
   , continue
   , halt
+  )
+import Brick.AttrMap
+  ( attrMap
   )
 import Brick.Types
   ( Widget
@@ -66,7 +68,7 @@ theApp =
         , appChooseCursor = showFirstCursor
         , appHandleEvent = appEvent
         , appStartEvent = return
-        , appAttrMap = def
+        , appAttrMap = const $ attrMap V.defAttr []
         }
 
 main :: IO ()
@@ -77,4 +79,4 @@ main = do
         writeBChan chan Counter
         threadDelay 1000000
 
-    void $ customMain (V.mkVty def) (Just chan) theApp initialState
+    void $ customMain (V.mkVty V.defaultConfig) (Just chan) theApp initialState
