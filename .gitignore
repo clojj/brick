@@ -5,3 +5,4 @@ dist-newstyle
 cabal.sandbox.config
 .DS_Store
 .stack-work
+.imdone

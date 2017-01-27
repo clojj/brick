@@ -20,7 +20,7 @@ module Brick.Widgets.EditRope
   -- * Handling events
   , handleEditorEvent
   -- * Editing text
-  , applyEdit
+  -- , applyEdit
   , applyComposed
   -- * Lenses for working with editors
   , editContentsL
@@ -35,7 +35,7 @@ where
 
 import Data.Monoid
 import Lens.Micro
-import Graphics.Vty (Event(..), Key(..))
+import Graphics.Vty (Event(..), Key(..), Modifier(..))
 
 import System.IO
 import Data.List
@@ -46,6 +46,24 @@ import qualified Graphics.Vty as V
 import Brick.Types
 import Brick.Widgets.Core
 import Brick.AttrMap
+
+type EditorOperation n = (Editor n -> Editor n)
+
+data Operation n =  
+  InsertChar (EditorOperation n)
+  | DeleteChar (EditorOperation n)
+  | MoveCursor (EditorOperation n)
+  | Undo
+  | NoOp
+
+instance Show (Operation n) where
+    show op = case op of
+      InsertChar _ -> "InsertChar"
+      DeleteChar _ -> "DeleteChar"
+      MoveCursor _ -> "MoveCursor"
+      Undo -> "Undo"
+      NoOp -> "NoOp"
+  
 
 -- | Editor state.  Editors support the following events by default:
 --
@@ -65,7 +83,7 @@ data Editor n =
            , editorName :: n
            -- ^ The name of the editor
            , cursorPos :: (Int, Int)
-           , operations :: [Editor n -> Editor n]
+           , operations :: [Operation n]
            }
 
 suffixLenses ''Editor
@@ -80,61 +98,83 @@ instance (Show n) => Show (Editor n) where
                , "editContents = " <> show ((Y.toString.editContents) e)
                , ", editorName = " <> show (editorName e)
                , ", cursorPos = " <> show (cursorPos e)
-               , ", operations = " <> show (length $ operations e)
+               , ", operations = " <> show (operations e)
                , "}"
                ]
 
 instance Named (Editor n) n where
     getName = editorName
 
-moveColumn :: Int -> (Int, Int) -> (Int, Int)
-moveColumn d (c, l) = (c + d, l)
 
 moveC :: Int -> (Editor n -> Editor n)
 moveC d = cursorPosL %~ moveColumn d
-
-moveLine :: Int -> (Int, Int) -> (Int, Int)
-moveLine d (c, l) = (c, l + d)
-
+  where
+    moveColumn :: Int -> (Int, Int) -> (Int, Int)
+    moveColumn cd (c, l) = (c + cd, l)
+    
 moveL :: Int -> (Editor n -> Editor n)
 moveL d = cursorPosL %~ moveLine d
-
-insertChar :: (Int, Int) -> Char -> (Y.YiString -> Y.YiString)
-insertChar (c, l) ch s =
-  let (lBefore, lAfter) = Y.splitAtLine l s
-      (cBefore, cAfter) = Y.splitAt c lAfter
-  in lBefore <> (cBefore <> Y.cons ch cAfter)
+  where
+    moveLine :: Int -> (Int, Int) -> (Int, Int)
+    moveLine ld (c, l) = (c, l + ld)
 
 insertCh :: (Int, Int) -> Char -> (Editor n -> Editor n)
 insertCh cp ch = editContentsL %~ insertChar cp ch
+  where
+    insertChar :: (Int, Int) -> Char -> (Y.YiString -> Y.YiString)
+    insertChar (c, l) char s =
+      let (lBefore, lAfter) = Y.splitAtLine l s
+          (cBefore, cAfter) = Y.splitAt c lAfter
+      in lBefore <> (cBefore <> Y.cons char cAfter)
 
-handleEditorEvent :: Show n => Event -> Editor n -> EventM n (Editor n)
+handleEditorEvent :: Event -> Editor n -> EventM n (Editor n)
 handleEditorEvent e ed = do
         let cp = ed ^. cursorPosL
-            fs = case e of
+            (contentF, cursorF) = case e of
                   -- EvKey (KChar 'a') [MCtrl] -> Z.gotoBOL
                   -- EvKey (KChar 'e') [MCtrl] -> Z.gotoEOL
                   -- EvKey (KChar 'd') [MCtrl] -> Z.deleteChar
                   -- EvKey (KChar 'k') [MCtrl] -> Z.killToEOL
                   -- EvKey (KChar 'u') [MCtrl] -> Z.killToBOL
-                  EvKey KEnter [] -> [insertCh cp '\n', moveL 1]
                   -- EvKey KDel [] -> Z.deleteChar
-                  EvKey (KChar c) [] | c /= '\t' -> [insertCh cp c, moveC 1]
-                  EvKey KUp [] -> [moveL (-1)]
-                  EvKey KDown [] -> [moveL 1]
-                  EvKey KLeft [] -> [moveC (-1)]
-                  EvKey KRight [] -> [moveC 1]
                   -- EvKey KBS [] -> Z.deletePrevChar
 
-                  _ -> []
+                  EvKey (KChar 'z') [MCtrl] -> (Undo, NoOp)
 
-        let e = consOp fs ed
-            e' = applyComposed fs e
-        liftIO $ hPutStrLn stderr $ show e'
-        return e'
+                  EvKey KEnter [] -> (InsertChar (insertCh cp '\n'), MoveCursor (moveL 1))
+                  EvKey (KChar c) [] | c /= '\t' -> (InsertChar (insertCh cp c), MoveCursor (moveC 1))
+                  EvKey KUp [] -> (NoOp, MoveCursor (moveL (-1)))
+                  EvKey KDown [] -> (NoOp, MoveCursor (moveL 1))
+                  EvKey KLeft [] -> (NoOp, MoveCursor (moveC (-1)))
+                  EvKey KRight [] -> (NoOp, MoveCursor (moveC 1))
 
-consOp :: [Editor n -> Editor n] -> Editor n -> Editor n
-consOp op e = e & operationsL %~ (\l -> op ++ l)
+                  _ -> (NoOp, NoOp)
+
+        let ed' = consOp contentF (applyComposed [contentF, cursorF] ed)
+        liftIO $ hPrint stderr (ed' ^. operationsL)
+        return ed'
+
+consOp :: Operation n -> Editor n -> Editor n
+consOp op e = 
+  case op of
+    Undo -> e
+    NoOp -> e
+    _ -> e & operationsL %~ (\l -> op : l)
+
+applyComposed :: [Operation n] -> Editor n -> Editor n
+applyComposed fs ed = foldl' compOp ed fs
+
+compOp :: Editor n -> Operation n -> Editor n
+compOp e op =
+  case op of
+    InsertChar f -> ap f
+    DeleteChar f -> ap f
+    MoveCursor f -> ap f
+    Undo -> idFun
+    NoOp -> idFun
+  where 
+    ap fun = e & fun
+    idFun = e & id
 
 -- | Construct an editor over 'String' values
 editor ::
@@ -147,19 +187,16 @@ editor ::
        -> Editor n
 editor name draw s = Editor s draw name (0, 0) []
 
-applyComposed :: [Editor n -> Editor n] -> Editor n -> Editor n
-applyComposed fs ed = foldl' (&) ed fs
-
 -- | Apply an editing operation to the editor's contents. Bear in mind
 -- that you should only apply operations that operate on the
 -- current line; the editor will only ever render the first line of
 -- text.
-applyEdit ::
-          -- ^ The editing transformation to apply
-          (Y.YiString -> Y.YiString)
-          -> Editor n
-          -> Editor n
-applyEdit f e = e & editContentsL %~ f
+-- applyEdit ::
+--           -- ^ The editing transformation to apply
+--           (Y.YiString -> Y.YiString)
+--           -> Editor n
+--           -> Editor n
+-- applyEdit f e = e & editContentsL %~ f
 
 -- | The attribute assigned to the editor when it does not have focus.
 editAttr :: AttrName
