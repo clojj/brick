@@ -37,8 +37,10 @@ import Data.Monoid
 import Lens.Micro
 import Graphics.Vty (Event(..), Key(..))
 
+import System.IO
 import Data.List
 import qualified Yi.Rope as Y
+import Control.Monad.IO.Class
 import qualified Graphics.Vty as V
 
 import Brick.Types
@@ -63,6 +65,7 @@ data Editor n =
            , editorName :: n
            -- ^ The name of the editor
            , cursorPos :: (Int, Int)
+           , operations :: [Editor n -> Editor n]
            }
 
 suffixLenses ''Editor
@@ -70,13 +73,14 @@ suffixLenses ''Editor
 -- TODO orphane instance !
 instance TextWidth Y.YiString where
   textWidth = V.wcswidth . Y.toString
-  
+
 instance (Show n) => Show (Editor n) where
     show e =
         concat [ "Editor { "
                , "editContents = " <> show ((Y.toString.editContents) e)
                , ", editorName = " <> show (editorName e)
                , ", cursorPos = " <> show (cursorPos e)
+               , ", operations = " <> show (length $ operations e)
                , "}"
                ]
 
@@ -85,8 +89,8 @@ instance Named (Editor n) n where
 
 moveColumn :: Int -> (Int, Int) -> (Int, Int)
 moveColumn d (c, l) = (c + d, l)
-  
-moveC :: Int -> (Editor n -> Editor n)  
+
+moveC :: Int -> (Editor n -> Editor n)
 moveC d = cursorPosL %~ moveColumn d
 
 moveLine :: Int -> (Int, Int) -> (Int, Int)
@@ -96,7 +100,7 @@ moveL :: Int -> (Editor n -> Editor n)
 moveL d = cursorPosL %~ moveLine d
 
 insertChar :: (Int, Int) -> Char -> (Y.YiString -> Y.YiString)
-insertChar (c, l) ch s = 
+insertChar (c, l) ch s =
   let (lBefore, lAfter) = Y.splitAtLine l s
       (cBefore, cAfter) = Y.splitAt c lAfter
   in lBefore <> (cBefore <> Y.cons ch cAfter)
@@ -104,8 +108,8 @@ insertChar (c, l) ch s =
 insertCh :: (Int, Int) -> Char -> (Editor n -> Editor n)
 insertCh cp ch = editContentsL %~ insertChar cp ch
 
-handleEditorEvent :: Event -> Editor n -> EventM n (Editor n)
-handleEditorEvent e ed =
+handleEditorEvent :: Show n => Event -> Editor n -> EventM n (Editor n)
+handleEditorEvent e ed = do
         let cp = ed ^. cursorPosL
             fs = case e of
                   -- EvKey (KChar 'a') [MCtrl] -> Z.gotoBOL
@@ -121,10 +125,16 @@ handleEditorEvent e ed =
                   EvKey KLeft [] -> [moveC (-1)]
                   EvKey KRight [] -> [moveC 1]
                   -- EvKey KBS [] -> Z.deletePrevChar
-                  
+
                   _ -> []
-        
-        in return $ applyComposed fs ed
+
+        let e = consOp fs ed
+            e' = applyComposed fs e
+        liftIO $ hPutStrLn stderr $ show e'
+        return e'
+
+consOp :: [Editor n -> Editor n] -> Editor n -> Editor n
+consOp op e = e & operationsL %~ (\l -> op ++ l)
 
 -- | Construct an editor over 'String' values
 editor ::
@@ -135,16 +145,16 @@ editor ::
        -> Y.YiString
        -- ^ The initial content
        -> Editor n
-editor name draw s = Editor s draw name (0, 0)
+editor name draw s = Editor s draw name (0, 0) []
 
 applyComposed :: [Editor n -> Editor n] -> Editor n -> Editor n
 applyComposed fs ed = foldl' (&) ed fs
- 
+
 -- | Apply an editing operation to the editor's contents. Bear in mind
 -- that you should only apply operations that operate on the
 -- current line; the editor will only ever render the first line of
 -- text.
-applyEdit :: 
+applyEdit ::
           -- ^ The editing transformation to apply
           (Y.YiString -> Y.YiString)
           -> Editor n
@@ -189,7 +199,7 @@ renderEditor foc e =
 charAtCursor :: (Int, Int) -> Y.YiString -> Maybe Y.YiString
 charAtCursor (c, l) s =
     Just "X" -- TODO what is the role of textWidth ? for variable-width fonts ?
-    
+
     -- let col = snd $ Z.cursorPosition z
     --     curLine = Z.currentLine z
     --     toRight = Z.drop col curLine
