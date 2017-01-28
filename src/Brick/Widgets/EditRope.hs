@@ -83,6 +83,8 @@ data Editor n =
            , editorName :: n
            -- ^ The name of the editor
            , editCursor :: Loc
+           
+           -- TODO undo will be inverse of operation, depending on increment/decrement of index into this list
            , editOperations :: [Operation]
            }
 
