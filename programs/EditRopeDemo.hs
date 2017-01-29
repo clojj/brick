@@ -24,6 +24,20 @@ import Brick.Util (on)
 
 import qualified Yi.Rope as Y
 
+import ErrUtils (mkPlainErrMsg)
+import FastString (mkFastString)
+import GHC hiding (Name(..))
+import GHC.Paths (libdir)
+import Lexer
+import qualified MonadUtils as GMU
+import SrcLoc
+import StringBuffer
+
+import Control.Monad
+import Control.Concurrent
+import System.IO
+
+
 data Name = Edit1
           | Edit2
           deriving (Ord, Show, Eq)
@@ -62,12 +76,12 @@ appEvent st (T.VtyEvent ev) =
                Nothing -> return st
 appEvent st _ = M.continue st
 
-initialState :: St
-initialState =
+initialState :: (MVar String, MVar [Located Token]) -> St
+initialState channels =
     St (F.focusRing [Edit1, Edit2])
        -- TODO build yiStr function for rendering Y.YiString
-       (E.editor Edit1 (str . Y.toString) "edit1")
-       (E.editor Edit2 (str . Y.toString) "edit2")
+       (E.editor Edit1 (str . Y.toString) "edit1" channels)
+       (E.editor Edit2 (str . Y.toString) "edit2" channels)
 
 theMap :: A.AttrMap
 theMap = A.attrMap V.defAttr
@@ -89,8 +103,49 @@ theApp =
 
 main :: IO ()
 main = do
-    st <- M.defaultMain theApp initialState
+    channels <- startGhc
+    st <- M.defaultMain theApp $ initialState channels
     putStrLn "In input 1 you entered:\n"
     putStrLn $ Y.toString $ E.getEditContents $ st^.edit1
     putStrLn "In input 2 you entered:\n"
     putStrLn $ Y.toString $ E.getEditContents $ st^.edit2
+
+
+startGhc :: IO (MVar String, MVar [Located Token])
+startGhc = do
+  chIn <- newEmptyMVar
+  chOut <- newEmptyMVar
+  threadId <- forkIO $ runGhc (Just libdir) $ do
+    flags <- getSessionDynFlags
+    let lexLoc = mkRealSrcLoc (mkFastString "<interactive>") 1 1
+    GMU.liftIO $ forever $ do
+        str <- takeMVar chIn
+        let sb = stringToStringBuffer str
+        let pResult = lexTokenStream sb lexLoc flags
+        case pResult of
+
+          POk _ toks -> GMU.liftIO $ do
+            hPrint stderr $ "TOKENS\n" ++ concatMap showToken toks
+            -- TODO putMVar chOut toks
+
+          PFailed srcspan msg -> do
+            GMU.liftIO $ print $ show srcspan
+            GMU.liftIO $
+              do putStrLn "Lexer Error:"
+                 print $ mkPlainErrMsg flags srcspan msg
+  return $ (chIn, chOut)
+
+
+showToken :: GenLocated SrcSpan Token -> String
+showToken t = "\nsrcLoc: " ++ srcloc ++ "\ntok: " ++ tok ++ "\n"
+  where
+    srcloc = show $ getLoc t
+    tok = show $ unLoc t
+
+showTokenWithSource :: (Located Token, String) -> String
+showTokenWithSource (loctok, src) =
+  "Located Token: " ++
+  tok ++ "\n" ++ "Source: " ++ src ++ "\n" ++ "Location: " ++ srcloc ++ "\n\n"
+  where
+    tok = show $ unLoc loctok
+    srcloc = show $ getLoc loctok

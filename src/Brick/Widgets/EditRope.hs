@@ -48,6 +48,17 @@ import Brick.Types
 import Brick.Widgets.Core
 import Brick.AttrMap
 
+import ErrUtils (mkPlainErrMsg)
+import FastString (mkFastString)
+import GHC
+import GHC.Paths (libdir)
+import Lexer
+import qualified MonadUtils as GMU
+import SrcLoc
+import StringBuffer
+
+import Control.Concurrent
+
 
 type Loc = (Int, Int)
 
@@ -83,7 +94,7 @@ data Editor n =
            , editorName :: n
            -- ^ The name of the editor
            , editCursor :: Loc
-           
+           , editLexerChans :: (MVar String, MVar [Located Token])
            -- TODO undo will be inverse of operation, depending on increment/decrement of index into this list
            , editOperations :: [Operation]
            }
@@ -117,6 +128,7 @@ moveCursor (c, l) =
     moveLine :: Int -> (Int, Int) -> (Int, Int)
     moveLine ld (c, l) = (c, l + ld)
 
+-- TODO refactor insertCh + deleteCh
 insertCh :: Char -> Loc -> (Editor n -> Editor n)
 insertCh ch loc = editContentsL %~ insertChar ch loc
   where
@@ -162,9 +174,12 @@ handleEditorEvent e ed = do
                   _ -> []
                   
             contentsOps = filter modifiesContents ops
-        let ed' = consOps contentsOps (applyComposed ops ed)
-        liftIO $ hPrint stderr (ed' ^. editOperationsL)
+            ed' = consOps contentsOps (applyComposed ops ed)
+        
+        liftIO $ putMVar (fst $ editLexerChans ed') ((Y.toString . editContents) ed')
+        -- liftIO $ hPrint stderr (ed' ^. editOperationsL)
         return ed'
+        
         where
           modifiesContents :: Operation -> Bool
           modifiesContents op = 
@@ -198,8 +213,9 @@ editor ::
        -- ^ The content rendering function
        -> Y.YiString
        -- ^ The initial content
+       -> (MVar String, MVar [Located Token])
        -> Editor n
-editor name draw s = Editor s draw name (0, 0) []
+editor name draw s channels = Editor s draw name (0, 0) channels []
 
 -- | Apply an editing operation to the editor's contents. Bear in mind
 -- that you should only apply operations that operate on the
