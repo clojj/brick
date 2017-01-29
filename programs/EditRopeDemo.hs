@@ -8,7 +8,15 @@ import Lens.Micro.TH
 import qualified Graphics.Vty as V
 
 import qualified Brick.Main as M
-import qualified Brick.Types as T
+-- import qualified Brick.Types as T
+import Brick.Types
+  ( Widget
+  , Next
+  , EventM
+  , BrickEvent(..)
+  , CursorLocation
+  , handleEventLensed
+  )
 import Brick.Widgets.Core
   ( (<+>)
   , (<=>)
@@ -33,9 +41,13 @@ import qualified MonadUtils as GMU
 import SrcLoc
 import StringBuffer
 
+import Control.Monad.IO.Class
 import Control.Monad
 import Control.Concurrent
 import System.IO
+
+import Brick.BChan
+
 
 
 data Name = Edit1
@@ -50,7 +62,7 @@ data St =
 
 makeLenses ''St
 
-drawUI :: St -> [T.Widget Name]
+drawUI :: St -> [Widget Name]
 drawUI st = [ui]
     where
         e1 = F.withFocusRing (st^.focusRing) E.renderEditor (st^.edit1)
@@ -63,20 +75,24 @@ drawUI st = [ui]
             str " " <=>
             str "Press Tab to switch between editors, Esc to quit."
 
-appEvent :: St -> T.BrickEvent Name e -> T.EventM Name (T.Next St)
-appEvent st (T.VtyEvent ev) =
-    case ev of
-        V.EvKey V.KEsc [] -> M.halt st
-        V.EvKey (V.KChar '\t') [] -> M.continue $ st & focusRing %~ F.focusNext
-        V.EvKey V.KBackTab [] -> M.continue $ st & focusRing %~ F.focusPrev
+appEvent :: St -> BrickEvent Name (E.TokenizedEvent [Located Token]) -> EventM Name (Next St)
+appEvent st e =
+    case e of
+        VtyEvent (V.EvKey V.KEsc []) -> M.halt st
+        VtyEvent (V.EvKey (V.KChar '\t') []) -> M.continue $ st & focusRing %~ F.focusNext
+        VtyEvent (V.EvKey V.KBackTab []) -> M.continue $ st & focusRing %~ F.focusPrev
 
-        _ -> M.continue =<< case F.focusGetCurrent (st^.focusRing) of
-               Just Edit1 -> T.handleEventLensed st edit1 E.handleEditorEvent ev
-               Just Edit2 -> T.handleEventLensed st edit2 E.handleEditorEvent ev
+        AppEvent (E.Tokens _) -> do
+          liftIO $ hPrint stderr "custom event.."
+          M.continue st 
+
+        VtyEvent (V.EvKey k l) -> M.continue =<< case F.focusGetCurrent (st^.focusRing) of
+               Just Edit1 -> handleEventLensed st edit1 E.handleEditorEvent (V.EvKey k l)
+               Just Edit2 -> handleEventLensed st edit2 E.handleEditorEvent (V.EvKey k l)
                Nothing -> return st
 appEvent st _ = M.continue st
 
-initialState :: (MVar String, MVar [Located Token]) -> St
+initialState :: (MVar String, BChan (E.TokenizedEvent [Located Token])) -> St
 initialState channels =
     St (F.focusRing [Edit1, Edit2])
        -- TODO build yiStr function for rendering Y.YiString
@@ -89,10 +105,10 @@ theMap = A.attrMap V.defAttr
     , (E.editFocusedAttr,            V.black `on` V.yellow)
     ]
 
-appCursor :: St -> [T.CursorLocation Name] -> Maybe (T.CursorLocation Name)
+appCursor :: St -> [CursorLocation Name] -> Maybe (CursorLocation Name)
 appCursor = F.focusRingCursor (^.focusRing)
 
-theApp :: M.App St e Name
+theApp :: M.App St (E.TokenizedEvent [Located Token]) Name
 theApp =
     M.App { M.appDraw = drawUI
           , M.appChooseCursor = appCursor
@@ -101,20 +117,11 @@ theApp =
           , M.appAttrMap = const theMap
           }
 
-main :: IO ()
-main = do
-    channels <- startGhc
-    st <- M.defaultMain theApp $ initialState channels
-    putStrLn "In input 1 you entered:\n"
-    putStrLn $ Y.toString $ E.getEditContents $ st^.edit1
-    putStrLn "In input 2 you entered:\n"
-    putStrLn $ Y.toString $ E.getEditContents $ st^.edit2
-
-
-startGhc :: IO (MVar String, MVar [Located Token])
+startGhc :: IO (MVar String, BChan (E.TokenizedEvent [Located Token]))
 startGhc = do
   chIn <- newEmptyMVar
-  chOut <- newEmptyMVar
+  -- chOut <- newEmptyMVar
+  chOut <- newBChan 10
   threadId <- forkIO $ runGhc (Just libdir) $ do
     flags <- getSessionDynFlags
     let lexLoc = mkRealSrcLoc (mkFastString "<interactive>") 1 1
@@ -126,7 +133,7 @@ startGhc = do
 
           POk _ toks -> GMU.liftIO $ do
             hPrint stderr $ "TOKENS\n" ++ concatMap showToken toks
-            -- TODO putMVar chOut toks
+            writeBChan chOut $ E.Tokens toks
 
           PFailed srcspan msg -> do
             GMU.liftIO $ print $ show srcspan
@@ -149,3 +156,14 @@ showTokenWithSource (loctok, src) =
   where
     tok = show $ unLoc loctok
     srcloc = show $ getLoc loctok
+
+main :: IO ()
+main = do
+    channels <- startGhc
+    -- st <- M.defaultMain theApp $ initialState channels
+    st <- M.customMain (V.mkVty V.defaultConfig) (Just $ snd channels) theApp $ initialState channels
+    putStrLn "In input 1 you entered:\n"
+    putStrLn $ Y.toString $ E.getEditContents $ st^.edit1
+    putStrLn "In input 2 you entered:\n"
+    putStrLn $ Y.toString $ E.getEditContents $ st^.edit2
+

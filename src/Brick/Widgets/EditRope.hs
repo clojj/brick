@@ -30,6 +30,7 @@ module Brick.Widgets.EditRope
   -- * Attributes
   , editAttr
   , editFocusedAttr
+  , TokenizedEvent(..)
   )
 where
 
@@ -59,6 +60,11 @@ import StringBuffer
 
 import Control.Concurrent
 
+import Brick.BChan
+
+
+data TokenizedEvent a = Tokens a
+  deriving Show
 
 type Loc = (Int, Int)
 
@@ -94,7 +100,7 @@ data Editor n =
            , editorName :: n
            -- ^ The name of the editor
            , editCursor :: Loc
-           , editLexerChans :: (MVar String, MVar [Located Token])
+           , editLexerChans :: (MVar String, BChan (TokenizedEvent [Located Token]))
            -- TODO undo will be inverse of operation, depending on increment/decrement of index into this list
            , editOperations :: [Operation]
            }
@@ -175,9 +181,12 @@ handleEditorEvent e ed = do
                   
             contentsOps = filter modifiesContents ops
             ed' = consOps contentsOps (applyComposed ops ed)
-        
+
+        -- TODO only send changed contents to lexer
         liftIO $ putMVar (fst $ editLexerChans ed') ((Y.toString . editContents) ed')
+        
         -- liftIO $ hPrint stderr (ed' ^. editOperationsL)
+        
         return ed'
         
         where
@@ -213,7 +222,7 @@ editor ::
        -- ^ The content rendering function
        -> Y.YiString
        -- ^ The initial content
-       -> (MVar String, MVar [Located Token])
+       -> (MVar String, BChan (TokenizedEvent [Located Token]))
        -> Editor n
 editor name draw s channels = Editor s draw name (0, 0) channels []
 
