@@ -41,7 +41,6 @@ import qualified MonadUtils as GMU
 import SrcLoc
 import StringBuffer
 
-import Control.Monad.IO.Class
 import Control.Monad
 import Control.Concurrent
 import System.IO
@@ -69,9 +68,9 @@ drawUI st = [ui]
         e2 = F.withFocusRing (st^.focusRing) E.renderEditor (st^.edit2)
 
         ui = C.center $
-            (str "Input 1 (unlimited): " <+> (hLimit 30 $ vLimit 5 e1)) <=>
+            (str "Input 1 (unlimited): " <+> hLimit 30 (vLimit 5 e1)) <=>
             str " " <=>
-            (str "Input 2 (limited to 2 lines): " <+> (hLimit 30 $ vLimit 5 e2)) <=>
+            (str "Input 2 (limited to 2 lines): " <+> hLimit 30 (vLimit 5 e2)) <=>
             str " " <=>
             str "Press Tab to switch between editors, Esc to quit."
 
@@ -82,15 +81,18 @@ appEvent st e =
         VtyEvent (V.EvKey (V.KChar '\t') []) -> M.continue $ st & focusRing %~ F.focusNext
         VtyEvent (V.EvKey V.KBackTab []) -> M.continue $ st & focusRing %~ F.focusPrev
 
-        AppEvent (E.Tokens _) -> do
-          liftIO $ hPrint stderr "custom event.."
-          M.continue st 
+        appEvt@(AppEvent (E.Tokens _)) -> handleInEditor st appEvt
 
-        VtyEvent (V.EvKey k l) -> M.continue =<< case F.focusGetCurrent (st^.focusRing) of
-               Just Edit1 -> handleEventLensed st edit1 E.handleEditorEvent (V.EvKey k l)
-               Just Edit2 -> handleEventLensed st edit2 E.handleEditorEvent (V.EvKey k l)
-               Nothing -> return st
+        vtyEv@(VtyEvent (V.EvKey _ _)) -> handleInEditor st vtyEv
+
 appEvent st _ = M.continue st
+
+handleInEditor :: St -> BrickEvent Name (E.TokenizedEvent [Located Token]) -> EventM Name (Next St)
+handleInEditor st e =
+  M.continue =<< case F.focusGetCurrent (st^.focusRing) of
+       Just Edit1 -> handleEventLensed st edit1 E.handleEditorEvent e
+       Just Edit2 -> handleEventLensed st edit2 E.handleEditorEvent e
+       Nothing -> return st
 
 initialState :: (MVar String, BChan (E.TokenizedEvent [Located Token])) -> St
 initialState channels =
@@ -166,4 +168,3 @@ main = do
     putStrLn $ Y.toString $ E.getEditContents $ st^.edit1
     putStrLn "In input 2 you entered:\n"
     putStrLn $ Y.toString $ E.getEditContents $ st^.edit2
-

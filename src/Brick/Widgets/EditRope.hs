@@ -58,6 +58,7 @@ import qualified MonadUtils as GMU
 import SrcLoc
 import StringBuffer
 
+import Control.Monad.IO.Class
 import Control.Concurrent
 
 import Brick.BChan
@@ -73,6 +74,7 @@ data Operation =
   | DeleteChar Loc
   | MoveCursor Loc
   | Undo
+  | HandleTokens [Located Token]
 
 instance Show Operation where
     show op = case op of
@@ -80,7 +82,7 @@ instance Show Operation where
       DeleteChar loc -> "DeleteChar " ++ show loc
       MoveCursor d -> "MoveCursor " ++ show d
       Undo -> "Undo"
-  
+
 
 -- | Editor state.  Editors support the following events by default:
 --
@@ -103,6 +105,7 @@ data Editor n =
            , editLexerChans :: (MVar String, BChan (TokenizedEvent [Located Token]))
            -- TODO undo will be inverse of operation, depending on increment/decrement of index into this list
            , editOperations :: [Operation]
+           , editTokens :: [Located Token]
            }
 
 suffixLenses ''Editor
@@ -118,6 +121,7 @@ instance (Show n) => Show (Editor n) where
                , ", editorName = " <> show (editorName e)
                , ", cursorPos = " <> show (editCursor e)
                , ", operations = " <> show (editOperations e)
+              -- TODO , ", tokens = " <> show (editTokens e)
                , "}"
                ]
 
@@ -125,8 +129,12 @@ instance Named (Editor n) n where
     getName = editorName
 
 
+-- TODO
+handleTokens :: [Located Token] -> (Editor n -> Editor n)
+handleTokens tokens = editTokensL .~ tokens
+
 moveCursor :: Loc -> (Editor n -> Editor n)
-moveCursor (c, l) = 
+moveCursor (c, l) =
   (editCursorL %~ moveColumn c) . (editCursorL %~ moveLine l)
   where
     moveColumn :: Int -> (Int, Int) -> (Int, Int)
@@ -155,7 +163,7 @@ deleteCh loc = editContentsL %~ deleteChar loc
       in lBefore <> (cBefore <> cTail)
 
 
-handleEditorEvent :: Event -> Editor n -> EventM n (Editor n)
+handleEditorEvent :: BrickEvent n (TokenizedEvent [Located Token]) -> Editor n -> EventM n (Editor n)
 handleEditorEvent e ed = do
         let cp = ed ^. editCursorL
             ops = case e of
@@ -167,38 +175,43 @@ handleEditorEvent e ed = do
                   -- EvKey KBS [] -> Z.deletePrevChar
                   -- EvKey KDel [] ->
 
-                  EvKey (KChar 'z') [MCtrl] -> [Undo]
+                  VtyEvent (EvKey (KChar 'z') [MCtrl]) -> [Undo]
 
-                  EvKey KBS [] -> [DeleteChar cp]
-                  EvKey KEnter [] -> [InsertChar '\n' cp, MoveCursor (1, 0)]
-                  EvKey (KChar c) [] | c /= '\t' -> [InsertChar c cp, MoveCursor (1, 0)]
+                  VtyEvent (EvKey KBS []) -> [DeleteChar cp]
+                  VtyEvent (EvKey KEnter []) -> [InsertChar '\n' cp, MoveCursor (1, 0)]
+                  VtyEvent (EvKey (KChar c) []) | c /= '\t' -> [InsertChar c cp, MoveCursor (1, 0)]
 
-                  EvKey KUp []    -> [MoveCursor (0, -1)]
-                  EvKey KDown []  -> [MoveCursor (0, 1)]
-                  EvKey KLeft []  -> [MoveCursor (-1, 0)]
-                  EvKey KRight [] -> [MoveCursor (1, 0)]
+                  VtyEvent (EvKey KUp [])    -> [MoveCursor (0, -1)]
+                  VtyEvent (EvKey KDown [])  -> [MoveCursor (0, 1)]
+                  VtyEvent (EvKey KLeft [])  -> [MoveCursor (-1, 0)]
+                  VtyEvent (EvKey KRight []) -> [MoveCursor (1, 0)]
+                  AppEvent (Tokens tokens) -> [HandleTokens tokens]
+
                   _ -> []
-                  
+
             contentsOps = filter modifiesContents ops
             ed' = consOps contentsOps (applyComposed ops ed)
 
         -- TODO only send changed contents to lexer
-        liftIO $ putMVar (fst $ editLexerChans ed') ((Y.toString . editContents) ed')
-        
+        case ops of
+          (InsertChar _ _ : _) -> do
+            liftIO $ putMVar (fst $ editLexerChans ed') ((Y.toString . editContents) ed')
+            return ed'
+          _ -> return ed'
+
         -- liftIO $ hPrint stderr (ed' ^. editOperationsL)
-        
-        return ed'
-        
+        -- return ed'
+
         where
           modifiesContents :: Operation -> Bool
-          modifiesContents op = 
+          modifiesContents op =
             case op of
               InsertChar _ _ -> True
               DeleteChar _ -> True
               _ -> False
 
 consOps :: [Operation] -> Editor n -> Editor n
-consOps ops e = 
+consOps ops e =
   case ops of
     [] -> e
     (op : _) -> e & editOperationsL %~ (\l -> op : l)
@@ -213,6 +226,7 @@ foldOperation e op =
     DeleteChar loc -> e & deleteCh loc
     MoveCursor d -> e & moveCursor d
     Undo -> e & id -- TODO
+    HandleTokens tokens -> e & handleTokens tokens -- TODO
 
 -- | Construct an editor over 'String' values
 editor ::
@@ -224,7 +238,7 @@ editor ::
        -- ^ The initial content
        -> (MVar String, BChan (TokenizedEvent [Located Token]))
        -> Editor n
-editor name draw s channels = Editor s draw name (0, 0) channels []
+editor name draw s channels = Editor s draw name (0, 0) channels [] []
 
 -- | Apply an editing operation to the editor's contents. Bear in mind
 -- that you should only apply operations that operate on the
