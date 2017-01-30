@@ -89,17 +89,17 @@ appEvent st _ = M.continue st
 
 handleInEditor :: St -> BrickEvent Name (E.TokenizedEvent [Located Token]) -> EventM Name (Next St)
 handleInEditor st e =
-  M.continue =<< case F.focusGetCurrent (st^.focusRing) of
+  M.continue =<< case F.focusGetCurrent (st ^. focusRing) of
        Just Edit1 -> handleEventLensed st edit1 E.handleEditorEvent e
        Just Edit2 -> handleEventLensed st edit2 E.handleEditorEvent e
        Nothing -> return st
 
-initialState :: (MVar String, BChan (E.TokenizedEvent [Located Token])) -> St
-initialState channels =
+initialState :: BChan (E.TokenizedEvent [Located Token]) -> MVar String -> St
+initialState evtChannel lexerChannel =
     St (F.focusRing [Edit1, Edit2])
        -- TODO build yiStr function for rendering Y.YiString
-       (E.editor Edit1 (str . Y.toString) "edit1" channels)
-       (E.editor Edit2 (str . Y.toString) "edit2" channels)
+       (E.editor Edit1 (str . Y.toString) "edit1" evtChannel lexerChannel)
+       (E.editor Edit2 (str . Y.toString) "edit2" evtChannel lexerChannel)
 
 theMap :: A.AttrMap
 theMap = A.attrMap V.defAttr
@@ -119,52 +119,15 @@ theApp =
           , M.appAttrMap = const theMap
           }
 
-startGhc :: IO (MVar String, BChan (E.TokenizedEvent [Located Token]))
-startGhc = do
-  chIn <- newEmptyMVar
-  -- chOut <- newEmptyMVar
-  chOut <- newBChan 10
-  threadId <- forkIO $ runGhc (Just libdir) $ do
-    flags <- getSessionDynFlags
-    let lexLoc = mkRealSrcLoc (mkFastString "<interactive>") 1 1
-    GMU.liftIO $ forever $ do
-        str <- takeMVar chIn
-        let sb = stringToStringBuffer str
-        let pResult = lexTokenStream sb lexLoc flags
-        case pResult of
-
-          POk _ toks -> GMU.liftIO $ do
-            hPrint stderr $ "TOKENS\n" ++ concatMap showToken toks
-            writeBChan chOut $ E.Tokens toks
-
-          PFailed srcspan msg -> do
-            GMU.liftIO $ print $ show srcspan
-            GMU.liftIO $
-              do putStrLn "Lexer Error:"
-                 print $ mkPlainErrMsg flags srcspan msg
-  return $ (chIn, chOut)
-
-
-showToken :: GenLocated SrcSpan Token -> String
-showToken t = "\nsrcLoc: " ++ srcloc ++ "\ntok: " ++ tok ++ "\n"
-  where
-    srcloc = show $ getLoc t
-    tok = show $ unLoc t
-
-showTokenWithSource :: (Located Token, String) -> String
-showTokenWithSource (loctok, src) =
-  "Located Token: " ++
-  tok ++ "\n" ++ "Source: " ++ src ++ "\n" ++ "Location: " ++ srcloc ++ "\n\n"
-  where
-    tok = show $ unLoc loctok
-    srcloc = show $ getLoc loctok
-
 main :: IO ()
 main = do
-    channels <- startGhc
-    -- st <- M.defaultMain theApp $ initialState channels
-    st <- M.customMain (V.mkVty V.defaultConfig) (Just $ snd channels) theApp $ initialState channels
-    putStrLn "In input 1 you entered:\n"
-    putStrLn $ Y.toString $ E.getEditContents $ st^.edit1
-    putStrLn "In input 2 you entered:\n"
-    putStrLn $ Y.toString $ E.getEditContents $ st^.edit2
+  evtChannel <- newBChan 1
+  lexerChannel <- newEmptyMVar
+  E.startGhc evtChannel lexerChannel
+  
+  st <- M.customMain (V.mkVty V.defaultConfig) (Just evtChannel) theApp (initialState evtChannel lexerChannel)
+  
+  putStrLn "In input 1 you entered:\n"
+  putStrLn $ Y.toString $ E.getEditContents $ st^.edit1
+  putStrLn "In input 2 you entered:\n"
+  putStrLn $ Y.toString $ E.getEditContents $ st^.edit2

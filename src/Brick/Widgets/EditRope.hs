@@ -31,6 +31,7 @@ module Brick.Widgets.EditRope
   , editAttr
   , editFocusedAttr
   , TokenizedEvent(..)
+  , startGhc
   )
 where
 
@@ -42,7 +43,6 @@ import System.IO
 import Data.List
 import Data.Maybe
 import qualified Yi.Rope as Y
-import Control.Monad.IO.Class
 import qualified Graphics.Vty as V
 
 import Brick.Types
@@ -58,6 +58,7 @@ import qualified MonadUtils as GMU
 import SrcLoc
 import StringBuffer
 
+import Control.Monad
 import Control.Monad.IO.Class
 import Control.Concurrent
 
@@ -82,6 +83,7 @@ instance Show Operation where
       DeleteChar loc -> "DeleteChar " ++ show loc
       MoveCursor d -> "MoveCursor " ++ show d
       Undo -> "Undo"
+      HandleTokens tokens -> "HandleTokens"
 
 
 -- | Editor state.  Editors support the following events by default:
@@ -102,13 +104,28 @@ data Editor n =
            , editorName :: n
            -- ^ The name of the editor
            , editCursor :: Loc
-           , editLexerChans :: (MVar String, BChan (TokenizedEvent [Located Token]))
+           , editEventChannel :: BChan (TokenizedEvent [Located Token])
+           , editLexerChannel :: MVar String
            -- TODO undo will be inverse of operation, depending on increment/decrement of index into this list
            , editOperations :: [Operation]
+           -- TODO render tokens
            , editTokens :: [Located Token]
            }
 
 suffixLenses ''Editor
+
+-- | Construct an editor over 'String' values
+editor ::
+       n
+       -- ^ The editor's name (must be unique)
+       -> (Y.YiString -> Widget n)
+       -- ^ The content rendering function
+       -> Y.YiString
+       -- ^ The initial content
+       -> BChan (TokenizedEvent [Located Token])
+       -> MVar String
+       -> Editor n
+editor name draw s evtChannel lexerChannel = Editor s draw name (0, 0) evtChannel lexerChannel [] []
 
 -- TODO orphane instance !
 instance TextWidth Y.YiString where
@@ -127,6 +144,42 @@ instance (Show n) => Show (Editor n) where
 
 instance Named (Editor n) n where
     getName = editorName
+
+startGhc :: BChan (TokenizedEvent [Located Token]) -> MVar String -> IO ()
+startGhc evtChannel lexerChannel = do
+  threadId <- forkIO $ runGhc (Just libdir) $ do
+    flags <- getSessionDynFlags
+    let lexLoc = mkRealSrcLoc (mkFastString "<interactive>") 1 1
+    GMU.liftIO $ forever $ do
+        src <- takeMVar lexerChannel
+        let sb = stringToStringBuffer src
+        let pResult = lexTokenStream sb lexLoc flags
+        case pResult of
+
+          POk _ toks -> GMU.liftIO $ do
+            hPrint stderr $ "TOKENS\n" ++ concatMap showToken toks
+            writeBChan evtChannel $ Tokens toks
+
+          PFailed srcspan msg -> do
+            GMU.liftIO $ print $ show srcspan
+            GMU.liftIO $
+              do putStrLn "Lexer Error:"
+                 print $ mkPlainErrMsg flags srcspan msg
+  return ()
+
+showToken :: GenLocated SrcSpan Token -> String
+showToken t = "\nsrcLoc: " ++ srcloc ++ "\ntok: " ++ tok ++ "\n"
+  where
+    srcloc = show $ getLoc t
+    tok = show $ unLoc t
+
+showTokenWithSource :: (Located Token, String) -> String
+showTokenWithSource (loctok, src) =
+  "Located Token: " ++
+  tok ++ "\n" ++ "Source: " ++ src ++ "\n" ++ "Location: " ++ srcloc ++ "\n\n"
+  where
+    tok = show $ unLoc loctok
+    srcloc = show $ getLoc loctok
 
 
 -- TODO
@@ -162,7 +215,6 @@ deleteCh loc = editContentsL %~ deleteChar loc
           cTail = fromMaybe Y.empty $ Y.tail cAfter
       in lBefore <> (cBefore <> cTail)
 
-
 handleEditorEvent :: BrickEvent n (TokenizedEvent [Located Token]) -> Editor n -> EventM n (Editor n)
 handleEditorEvent e ed = do
         let cp = ed ^. editCursorL
@@ -192,10 +244,10 @@ handleEditorEvent e ed = do
             contentsOps = filter modifiesContents ops
             ed' = consOps contentsOps (applyComposed ops ed)
 
-        -- TODO only send changed contents to lexer
         case ops of
+          -- TODO only send changed contents to lexer
           (InsertChar _ _ : _) -> do
-            liftIO $ putMVar (fst $ editLexerChans ed') ((Y.toString . editContents) ed')
+            liftIO $ putMVar (editLexerChannel ed') ((Y.toString . editContents) ed')
             return ed'
           _ -> return ed'
 
@@ -227,18 +279,6 @@ foldOperation e op =
     MoveCursor d -> e & moveCursor d
     Undo -> e & id -- TODO
     HandleTokens tokens -> e & handleTokens tokens -- TODO
-
--- | Construct an editor over 'String' values
-editor ::
-       n
-       -- ^ The editor's name (must be unique)
-       -> (Y.YiString -> Widget n)
-       -- ^ The content rendering function
-       -> Y.YiString
-       -- ^ The initial content
-       -> (MVar String, BChan (TokenizedEvent [Located Token]))
-       -> Editor n
-editor name draw s channels = Editor s draw name (0, 0) channels [] []
 
 -- | Apply an editing operation to the editor's contents. Bear in mind
 -- that you should only apply operations that operate on the
