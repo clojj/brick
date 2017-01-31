@@ -48,6 +48,7 @@ import Control.Monad
 import Control.Monad.IO.Class
 
 import System.IO
+import qualified Control.FoldDebounce as Fdeb
 
 
 data EditorName = Edit1
@@ -96,12 +97,12 @@ handleInEditor st e =
        Just Edit2 -> handleEventLensed st edit2 E.handleEditorEvent e
        Nothing -> return st
 
-initialState :: BChan (E.TokenizedEvent [GHC.Located GHC.Token]) -> MVar String -> St
-initialState eventChannel lexerChannel =
+initialState :: BChan (E.TokenizedEvent [GHC.Located GHC.Token]) -> MVar String -> (String -> IO ()) -> St
+initialState eventChannel lexerChannel sendSource =
     St (F.focusRing [Edit1, Edit2])
        -- TODO build yiStr function for rendering Y.YiString
-       (E.editor Edit1 (str . Y.toString) "edit1" eventChannel lexerChannel)
-       (E.editor Edit2 (str . Y.toString) "edit2" eventChannel lexerChannel)
+       (E.editor Edit1 (str . Y.toString) "edit1" eventChannel lexerChannel sendSource)
+       (E.editor Edit2 (str . Y.toString) "edit2" eventChannel lexerChannel sendSource)
 
 theMap :: A.AttrMap
 theMap = A.attrMap V.defAttr
@@ -125,20 +126,6 @@ startEvent :: St -> EventM EditorName St
 startEvent st = do
   startEventLensed st edit1 E.startEvent
   startEventLensed st edit2 E.startEvent
-
-main :: IO ()
-main = do
-  eventChannel <- newBChan 1
-  lexerChannel <- liftIO newEmptyMVar
-
-  liftIO $ startGhc eventChannel lexerChannel
-
-  st <- M.customMain (V.mkVty V.defaultConfig) (Just eventChannel) theApp (initialState eventChannel lexerChannel)
-
-  putStrLn "In input 1 you entered:\n"
-  putStrLn $ Y.toString $ E.getEditContents $ st^.edit1
-  putStrLn "In input 2 you entered:\n"
-  putStrLn $ Y.toString $ E.getEditContents $ st^.edit2
 
 startGhc :: BChan (E.TokenizedEvent [Located Token]) -> MVar String -> IO ()
 startGhc eventChannel lexerChannel = do
@@ -175,3 +162,24 @@ showTokenWithSource (loctok, src) =
   where
     tok = show $ unLoc loctok
     srcloc = show $ getLoc loctok
+
+
+main :: IO ()
+main = do
+  eventChannel <- newBChan 1
+  lexerChannel <- liftIO newEmptyMVar
+
+  liftIO $ startGhc eventChannel lexerChannel
+
+  -- TODO replace (hPrint stderr) with the real thing
+  trigger <- Fdeb.new Fdeb.Args { Fdeb.cb = hPrint stderr, Fdeb.fold = \_ i -> i, Fdeb.init = "" }
+                      Fdeb.def { Fdeb.delay = 300000 }
+  let sendSource = Fdeb.send trigger
+
+  let initSt = initialState eventChannel lexerChannel sendSource
+  st <- M.customMain (V.mkVty V.defaultConfig) (Just eventChannel) theApp initSt
+
+  putStrLn "In input 1 you entered:\n"
+  putStrLn $ Y.toString $ E.getEditContents $ st^.edit1
+  putStrLn "In input 2 you entered:\n"
+  putStrLn $ Y.toString $ E.getEditContents $ st^.edit2

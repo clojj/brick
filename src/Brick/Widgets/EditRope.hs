@@ -98,11 +98,12 @@ data Editor n =
            -- ^ The name of the editor
            , editCursor :: Loc
            , editEventChannel :: BChan (TokenizedEvent [Located Token])
-           , editLexerChannel :: Maybe (MVar String)
+           , editLexerChannel :: MVar String
            -- TODO undo will be inverse of operation, depending on increment/decrement of index into this list
            , editOperations :: [Operation]
            -- TODO render tokens
            , editTokens :: [Located Token]
+           , editSendSource :: String -> IO ()
            }
 suffixLenses ''Editor
 
@@ -116,12 +117,13 @@ editor ::
        -- ^ The initial content
        -> BChan (TokenizedEvent [Located Token])
        -> MVar String
+       -> (String -> IO ())
        -> Editor n
-editor name draw s eventChannel lexerChannel = Editor s draw name (0, 0) eventChannel (Just lexerChannel) [] []
+editor name draw s eventChannel lexerChannel sendSource = Editor s draw name (0, 0) eventChannel lexerChannel [] [] sendSource
 
 -- TODO orphane instance !
-instance TextWidth Y.YiString where
-  textWidth = V.wcswidth . Y.toString
+-- instance TextWidth Y.YiString where
+--   textWidth = V.wcswidth . Y.toString
 
 instance (Show n) => Show (Editor n) where
     show e =
@@ -147,9 +149,9 @@ moveCursor (column, line) =
   (editCursorL %~ moveColumn column) . (editCursorL %~ moveLine line)
   where
     moveColumn :: Int -> (Int, Int) -> (Int, Int)
-    moveColumn cd (c, l) = (c + cd, l)
+    moveColumn newColumn (_, l) = (newColumn, l)
     moveLine :: Int -> (Int, Int) -> (Int, Int)
-    moveLine ld (c, l) = (c, l + ld)
+    moveLine newLine (c, _) = (c, newLine)
 
 -- TODO refactor insertCh + deleteCh
 insertCh :: Char -> Loc -> (Editor n -> Editor n)
@@ -173,7 +175,7 @@ deleteCh position = editContentsL %~ deleteChar position
 
 handleEditorEvent :: BrickEvent n (TokenizedEvent [Located Token]) -> Editor n -> EventM n (Editor n)
 handleEditorEvent e ed = do
-        let cp = ed ^. editCursorL
+        let cp@(column, line) = ed ^. editCursorL
             ops = case e of
                   -- EvKey (KChar 'a') [MCtrl] -> Z.gotoBOL
                   -- EvKey (KChar 'e') [MCtrl] -> Z.gotoEOL
@@ -186,13 +188,13 @@ handleEditorEvent e ed = do
                   VtyEvent (EvKey (KChar 'z') [MCtrl]) -> [Undo]
 
                   VtyEvent (EvKey KBS []) -> [DeleteChar cp]
-                  VtyEvent (EvKey KEnter []) -> [InsertChar '\n' cp, MoveCursor (1, 0)]
-                  VtyEvent (EvKey (KChar c) []) | c /= '\t' -> [InsertChar c cp, MoveCursor (1, 0)]
+                  VtyEvent (EvKey KEnter []) -> [InsertChar '\n' cp, MoveCursor (0, line + 1)]
+                  VtyEvent (EvKey (KChar c) []) | c /= '\t' -> [InsertChar c cp, MoveCursor (column + 1, line)]
 
-                  VtyEvent (EvKey KUp [])    -> [MoveCursor (0, -1)]
-                  VtyEvent (EvKey KDown [])  -> [MoveCursor (0, 1)]
-                  VtyEvent (EvKey KLeft [])  -> [MoveCursor (-1, 0)]
-                  VtyEvent (EvKey KRight []) -> [MoveCursor (1, 0)]
+                  VtyEvent (EvKey KUp [])    -> [MoveCursor (column, line - 1)]
+                  VtyEvent (EvKey KDown [])  -> [MoveCursor (column, line + 1)]
+                  VtyEvent (EvKey KLeft [])  -> [MoveCursor (column - 1, line)]
+                  VtyEvent (EvKey KRight []) -> [MoveCursor (column + 1, line)]
                   AppEvent (Tokens tokens) -> [HandleTokens tokens]
 
                   _ -> []
@@ -201,13 +203,9 @@ handleEditorEvent e ed = do
             ed' = consOps contentsOps (applyComposed ops ed)
 
         case ops of
-          -- TODO only send changed contents to lexer
-          (InsertChar _ _ : _) ->
-            case editLexerChannel ed' of
-              Just ch -> do
-                liftIO $ putMVar ch ((Y.toString . editContents) ed')
-                return ed'
-              _ -> return ed'
+          -- TODO refactor.. only send changed contents to lexer
+          (DeleteChar _ : _) -> sendToLexer ed'
+          (InsertChar _ _ : _) -> sendToLexer ed'
           _ -> return ed'
 
         -- liftIO $ hPrint stderr (ed' ^. editOperationsL)
@@ -221,6 +219,13 @@ handleEditorEvent e ed = do
               DeleteChar _ -> True
               _ -> False
 
+sendToLexer :: Editor n -> EventM n (Editor n)
+sendToLexer ed = do
+  -- TODO
+  liftIO $ editSendSource ed $ (Y.toString . editContents) ed
+  liftIO $ putMVar (editLexerChannel ed) ((Y.toString . editContents) ed)
+  return ed
+  
 consOps :: [Operation] -> Editor n -> Editor n
 consOps ops e =
   case ops of
@@ -273,37 +278,39 @@ renderEditor :: (Ord n, Show n)
              -> Editor n
              -- ^ The editor.
              -> Widget n
-renderEditor foc e =
+renderEditor focus e =
     let cp = e ^. editCursorL
+
+        -- TODO limit viewport like EditDemo.hs
+        
+        -- toLeft = Z.take (cp^._2) (Z.currentLine z)
+        -- cursorLoc = Location (textWidth toLeft, cp^._1)
+        -- limit = case e^.editContentsL.to Z.getLineLimit of
+        --     Nothing -> id
+        --     Just lim -> vLimit lim
+
         cursorLoc = Location cp
         atChar = charAtCursor cp $ e ^. editContentsL
         atCharWidth = maybe 1 textWidth atChar
-    in withAttr (if foc then editFocusedAttr else editAttr) $
+    in withAttr (if focus then editFocusedAttr else editAttr) $
+       -- TODO limit $
        viewport (e^.editorNameL) Both $
        clickable (e^.editorNameL) $
-       (if foc then showCursor (e^.editorNameL) cursorLoc else id) $
+       (if focus then showCursor (e^.editorNameL) cursorLoc else id) $
        visibleRegion cursorLoc (atCharWidth, 1) $
        e^.editDrawContentsL $ getEditContents e
 
-charAtCursor :: (Int, Int) -> Y.YiString -> Maybe Y.YiString
-charAtCursor (c, l) s =
-  -- TODO
-  Just "X"
+charAtCursor :: (Int, Int) -> Y.YiString -> Maybe String
+charAtCursor (column, line) s =
+  let toRight = snd $ Y.splitAt column (snd $ Y.splitAtLine line s)
+  in fmap (replicate 1) (Y.head toRight)
 
-  -- let col = snd $ Z.cursorPosition z
-  --     curLine = Z.currentLine z
-  --     toRight = Z.drop col curLine
-  -- in if Z.length toRight > 0
-  --    then Just $ Z.take 1 toRight
-  --    else Nothing
 
 startEvent :: Editor n -> EventM n (Editor n)
 startEvent ed = do
   liftIO $ hPrint stderr $ "in startEvent: " ++ Y.toString (ed^.editContentsL)
-
-  -- TODO start lexer here ? not so good... it should be shared among all editors for one stack-project
+  -- TODO remove: start lexer here is probably not viable... it should be shared among all editors for one stack-project
   -- lexerChannel <- liftIO newEmptyMVar
   -- let ed' = ed & (editLexerChannelL .~ Just lexerChannel)
   -- liftIO $ startGhc (ed' ^. editEventChannelL) lexerChannel
-
   return ed
