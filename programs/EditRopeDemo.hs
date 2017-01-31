@@ -115,9 +115,12 @@ theApp =
     M.App { M.appDraw = drawUI
           , M.appChooseCursor = appCursor
           , M.appHandleEvent = appEvent
-          , M.appStartEvent = return
+          , M.appStartEvent = startEvent -- return
           , M.appAttrMap = const theMap
           }
+
+startEvent :: St -> EventM Name St
+startEvent st = E.startEvent (st^.edit1) st
 
 main :: IO ()
 main = do

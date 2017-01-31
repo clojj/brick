@@ -32,6 +32,7 @@ module Brick.Widgets.EditRope
   , editFocusedAttr
   , TokenizedEvent(..)
   , startGhc
+  , startEvent
   )
 where
 
@@ -336,3 +337,8 @@ charAtCursor (c, l) s =
     -- in if Z.length toRight > 0
     --    then Just $ Z.take 1 toRight
     --    else Nothing
+
+startEvent :: Editor n -> s -> EventM n s
+startEvent ed st = do
+  liftIO $ hPrint stderr $ "in startEvent: " ++ Y.toString (ed^.editContentsL)
+  return st
