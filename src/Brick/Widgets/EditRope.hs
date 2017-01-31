@@ -287,14 +287,15 @@ renderEditor foc e =
 
 charAtCursor :: (Int, Int) -> Y.YiString -> Maybe Y.YiString
 charAtCursor (c, l) s =
-    Just "X" -- TODO what is the role of textWidth ? for variable-width fonts ?
+  -- TODO
+  Just "X"
 
-    -- let col = snd $ Z.cursorPosition z
-    --     curLine = Z.currentLine z
-    --     toRight = Z.drop col curLine
-    -- in if Z.length toRight > 0
-    --    then Just $ Z.take 1 toRight
-    --    else Nothing
+  -- let col = snd $ Z.cursorPosition z
+  --     curLine = Z.currentLine z
+  --     toRight = Z.drop col curLine
+  -- in if Z.length toRight > 0
+  --    then Just $ Z.take 1 toRight
+  --    else Nothing
 
 startEvent :: Editor n -> EventM n (Editor n)
 startEvent ed = do

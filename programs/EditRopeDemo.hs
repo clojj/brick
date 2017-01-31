@@ -86,6 +86,8 @@ appEvent st e =
 
         vtyEv@(VtyEvent (V.EvKey _ _)) -> handleInEditor st vtyEv
 
+        _ -> M.continue st
+
 
 handleInEditor :: St -> BrickEvent EditorName (E.TokenizedEvent [GHC.Located GHC.Token]) -> EventM EditorName (Next St)
 handleInEditor st e =
