@@ -31,7 +31,7 @@ module Brick.Widgets.EditRope
   , editAttr
   , editFocusedAttr
   , TokenizedEvent(..)
-  , startGhc
+  -- , startGhc
   , startEvent
   )
 where
@@ -49,21 +49,13 @@ import qualified Graphics.Vty as V
 import Brick.Types
 import Brick.Widgets.Core
 import Brick.AttrMap
+import Brick.BChan
 
-import ErrUtils (mkPlainErrMsg)
-import FastString (mkFastString)
 import GHC
-import GHC.Paths (libdir)
-import Lexer
-import qualified MonadUtils as GMU
-import SrcLoc
-import StringBuffer
 
-import Control.Monad
 import Control.Monad.IO.Class
 import Control.Concurrent
 
-import Brick.BChan
 
 
 data TokenizedEvent a = Tokens a
@@ -80,8 +72,8 @@ data Operation =
 
 instance Show Operation where
     show op = case op of
-      InsertChar ch loc -> "InsertChar " ++ [ch] ++ " " ++ show loc
-      DeleteChar loc -> "DeleteChar " ++ show loc
+      InsertChar ch position -> "InsertChar " ++ [ch] ++ " " ++ show position
+      DeleteChar position -> "DeleteChar " ++ show position
       MoveCursor d -> "MoveCursor " ++ show d
       Undo -> "Undo"
       HandleTokens tokens -> "HandleTokens"
@@ -106,13 +98,12 @@ data Editor n =
            -- ^ The name of the editor
            , editCursor :: Loc
            , editEventChannel :: BChan (TokenizedEvent [Located Token])
-           , editLexerChannel :: MVar String
+           , editLexerChannel :: Maybe (MVar String)
            -- TODO undo will be inverse of operation, depending on increment/decrement of index into this list
            , editOperations :: [Operation]
            -- TODO render tokens
            , editTokens :: [Located Token]
            }
-
 suffixLenses ''Editor
 
 -- | Construct an editor over 'String' values
@@ -126,7 +117,7 @@ editor ::
        -> BChan (TokenizedEvent [Located Token])
        -> MVar String
        -> Editor n
-editor name draw s evtChannel lexerChannel = Editor s draw name (0, 0) evtChannel lexerChannel [] []
+editor name draw s eventChannel lexerChannel = Editor s draw name (0, 0) eventChannel (Just lexerChannel) [] []
 
 -- TODO orphane instance !
 instance TextWidth Y.YiString where
@@ -146,50 +137,14 @@ instance (Show n) => Show (Editor n) where
 instance Named (Editor n) n where
     getName = editorName
 
-startGhc :: BChan (TokenizedEvent [Located Token]) -> MVar String -> IO ()
-startGhc evtChannel lexerChannel = do
-  threadId <- forkIO $ runGhc (Just libdir) $ do
-    flags <- getSessionDynFlags
-    let lexLoc = mkRealSrcLoc (mkFastString "<interactive>") 1 1
-    GMU.liftIO $ forever $ do
-        src <- takeMVar lexerChannel
-        let sb = stringToStringBuffer src
-        let pResult = lexTokenStream sb lexLoc flags
-        case pResult of
-
-          POk _ toks -> GMU.liftIO $ do
-            hPrint stderr $ "TOKENS\n" ++ concatMap showToken toks
-            writeBChan evtChannel $ Tokens toks
-
-          PFailed srcspan msg -> do
-            GMU.liftIO $ print $ show srcspan
-            GMU.liftIO $
-              do putStrLn "Lexer Error:"
-                 print $ mkPlainErrMsg flags srcspan msg
-  return ()
-
-showToken :: GenLocated SrcSpan Token -> String
-showToken t = "\nsrcLoc: " ++ srcloc ++ "\ntok: " ++ tok ++ "\n"
-  where
-    srcloc = show $ getLoc t
-    tok = show $ unLoc t
-
-showTokenWithSource :: (Located Token, String) -> String
-showTokenWithSource (loctok, src) =
-  "Located Token: " ++
-  tok ++ "\n" ++ "Source: " ++ src ++ "\n" ++ "Location: " ++ srcloc ++ "\n\n"
-  where
-    tok = show $ unLoc loctok
-    srcloc = show $ getLoc loctok
-
 
 -- TODO
 handleTokens :: [Located Token] -> (Editor n -> Editor n)
 handleTokens tokens = editTokensL .~ tokens
 
 moveCursor :: Loc -> (Editor n -> Editor n)
-moveCursor (c, l) =
-  (editCursorL %~ moveColumn c) . (editCursorL %~ moveLine l)
+moveCursor (column, line) =
+  (editCursorL %~ moveColumn column) . (editCursorL %~ moveLine line)
   where
     moveColumn :: Int -> (Int, Int) -> (Int, Int)
     moveColumn cd (c, l) = (c + cd, l)
@@ -198,7 +153,7 @@ moveCursor (c, l) =
 
 -- TODO refactor insertCh + deleteCh
 insertCh :: Char -> Loc -> (Editor n -> Editor n)
-insertCh ch loc = editContentsL %~ insertChar ch loc
+insertCh ch position = editContentsL %~ insertChar ch position
   where
     insertChar :: Char -> Loc -> (Y.YiString -> Y.YiString)
     insertChar char (c, l) s =
@@ -207,7 +162,7 @@ insertCh ch loc = editContentsL %~ insertChar ch loc
       in lBefore <> (cBefore <> Y.cons char cAfter)
 
 deleteCh :: Loc -> (Editor n -> Editor n)
-deleteCh loc = editContentsL %~ deleteChar loc
+deleteCh position = editContentsL %~ deleteChar position
   where
     deleteChar :: Loc -> (Y.YiString -> Y.YiString)
     deleteChar (c, l) s =
@@ -247,9 +202,12 @@ handleEditorEvent e ed = do
 
         case ops of
           -- TODO only send changed contents to lexer
-          (InsertChar _ _ : _) -> do
-            liftIO $ putMVar (editLexerChannel ed') ((Y.toString . editContents) ed')
-            return ed'
+          (InsertChar _ _ : _) ->
+            case editLexerChannel ed' of
+              Just ch -> do
+                liftIO $ putMVar ch ((Y.toString . editContents) ed')
+                return ed'
+              _ -> return ed'
           _ -> return ed'
 
         -- liftIO $ hPrint stderr (ed' ^. editOperationsL)
@@ -275,8 +233,8 @@ applyComposed fs ed = foldl' foldOperation ed fs
 foldOperation :: Editor n -> Operation -> Editor n
 foldOperation e op =
   case op of
-    InsertChar ch loc -> e & insertCh ch loc
-    DeleteChar loc -> e & deleteCh loc
+    InsertChar ch position -> e & insertCh ch position
+    DeleteChar position -> e & deleteCh position
     MoveCursor d -> e & moveCursor d
     Undo -> e & id -- TODO
     HandleTokens tokens -> e & handleTokens tokens -- TODO
@@ -338,10 +296,13 @@ charAtCursor (c, l) s =
     --    then Just $ Z.take 1 toRight
     --    else Nothing
 
-startEvent :: Editor n -> s -> EventM n s
-startEvent ed st = do
+startEvent :: Editor n -> EventM n (Editor n)
+startEvent ed = do
   liftIO $ hPrint stderr $ "in startEvent: " ++ Y.toString (ed^.editContentsL)
-  lexerChannel <- liftIO $ newEmptyMVar
-  -- e & ed .~ editLexerChannel
-  -- liftIO $ startGhc ed & (ed ^. editEventChannel) lexerChannel
-  return st
+
+  -- TODO start lexer here ? not so good... it should be shared among all editors for one stack-project
+  -- lexerChannel <- liftIO newEmptyMVar
+  -- let ed' = ed & (editLexerChannelL .~ Just lexerChannel)
+  -- liftIO $ startGhc (ed' ^. editEventChannelL) lexerChannel
+
+  return ed

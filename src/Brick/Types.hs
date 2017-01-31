@@ -27,6 +27,7 @@ module Brick.Types
   , Next
   , BrickEvent(..)
   , handleEventLensed
+  , startEventLensed
 
   -- * Rendering infrastructure
   , RenderM
@@ -108,6 +109,17 @@ handleEventLensed :: a
                   -> EventM n a
 handleEventLensed v target handleEvent ev = do
     newB <- handleEvent ev (v^.target)
+    return $ v & target .~ newB
+
+startEventLensed :: a
+                  -- ^ The state value.
+                  -> Lens' a b
+                  -- ^ The lens to use to extract and store the target
+                  -- of the event.
+                  -> (b -> EventM n b)
+                  -> EventM n a
+startEventLensed v target startEvent = do
+    newB <- startEvent (v^.target)
     return $ v & target .~ newB
 
 -- | The monad in which event handlers run. Although it may be tempting
