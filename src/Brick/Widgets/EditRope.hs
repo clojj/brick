@@ -341,4 +341,7 @@ charAtCursor (c, l) s =
 startEvent :: Editor n -> s -> EventM n s
 startEvent ed st = do
   liftIO $ hPrint stderr $ "in startEvent: " ++ Y.toString (ed^.editContentsL)
+  lexerChannel <- liftIO $ newEmptyMVar
+  -- e & ed .~ editLexerChannel
+  -- liftIO $ startGhc ed & (ed ^. editEventChannel) lexerChannel
   return st

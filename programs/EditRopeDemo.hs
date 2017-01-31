@@ -126,7 +126,7 @@ main :: IO ()
 main = do
   evtChannel <- newBChan 1
   lexerChannel <- newEmptyMVar
-  E.startGhc evtChannel lexerChannel
+  -- E.startGhc evtChannel lexerChannel
   
   st <- M.customMain (V.mkVty V.defaultConfig) (Just evtChannel) theApp (initialState evtChannel lexerChannel)
   
