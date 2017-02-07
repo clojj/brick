@@ -221,7 +221,7 @@ sendToLexer :: Editor n -> EventM n (Editor n)
 sendToLexer ed = do
   -- TODO
   liftIO $ editSendSource ed $ (Y.toString . editContents) ed
-  -- liftIO $ putMVar (editLexerChannel ed) ((Y.toString . editContents) ed)
+  -- TODO liftIO $ putMVar (editLexerChannel ed) ((Y.toString . editContents) ed)
   return ed
   
 consOps :: [Operation] -> Editor n -> Editor n
