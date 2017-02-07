@@ -51,16 +51,15 @@ import System.IO
 import qualified Control.FoldDebounce as Fdeb
 
 
-data EditorName = Edit1
-          | Edit2
-          deriving (Ord, Show, Eq)
+data EditorName =
+  Edit1 | Edit2
+  deriving (Ord, Show, Eq)
 
 data St =
     St { _focusRing :: F.FocusRing EditorName
        , _edit1 :: E.Editor EditorName
        , _edit2 :: E.Editor EditorName
        }
-
 makeLenses ''St
 
 drawUI :: St -> [Widget EditorName]
@@ -72,7 +71,7 @@ drawUI st = [ui]
         ui = C.center $
             (str "Input 1 (unlimited): " <+> hLimit 30 (vLimit 5 e1)) <=>
             str " " <=>
-            (str "Input 2 (limited to 2 lines): " <+> hLimit 30 (vLimit 5 e2)) <=>
+            (str "Input 2 (limited to 2 lines): " <+> hLimit 30 (vLimit 2 e2)) <=>
             str " " <=>
             str "Press Tab to switch between editors, Esc to quit."
 
@@ -88,7 +87,6 @@ appEvent st e =
         vtyEv@(VtyEvent (V.EvKey _ _)) -> handleInEditor st vtyEv
 
         _ -> M.continue st
-
 
 handleInEditor :: St -> BrickEvent EditorName (E.TokenizedEvent [GHC.Located GHC.Token]) -> EventM EditorName (Next St)
 handleInEditor st e =
