@@ -171,7 +171,7 @@ main = do
 
   -- TODO replace (hPrint stderr) with the real thing
   trigger <- Fdeb.new Fdeb.Args { Fdeb.cb = hPrint stderr, Fdeb.fold = \_ i -> i, Fdeb.init = "" }
-                      Fdeb.def { Fdeb.delay = 300000 }
+                      Fdeb.def { Fdeb.delay = 500000 }
   let sendSource = Fdeb.send trigger
 
   let initSt = initialState eventChannel lexerChannel sendSource
