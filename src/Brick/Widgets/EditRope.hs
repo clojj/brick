@@ -173,7 +173,8 @@ handleEditorEvent :: BrickEvent n (TokenizedEvent [Located Token]) -> Editor n -
 handleEditorEvent e ed = do
         let cp@(column, line) = ed ^. editCursorL
             contents = editContents ed
-            lineCount = Y.countNewLines contents
+            
+            -- TODO refactor all these cursor movemnts
             (contentOp, cursorOp, metaOp) = case e of
                   -- EvKey (KChar 'a') [MCtrl] -> Z.gotoBOL
                   -- EvKey (KChar 'e') [MCtrl] -> Z.gotoEOL
@@ -184,16 +185,16 @@ handleEditorEvent e ed = do
                   VtyEvent (EvKey (KChar 'z') [MCtrl]) -> (Undo, NoOp, NoOp)
 
                   VtyEvent (EvKey KDel []) -> (DeleteChar cp, NoOp, NoOp)
-                  -- TODO delete only to column 0
+                  
+                  -- TODO if at column 0, delete at (line - 1) if line > 0
                   VtyEvent (EvKey KBS []) -> (DeleteChar (max 0 (column - 1), line), MoveCursor (max 0 (column - 1), line), NoOp)
                   
                   VtyEvent (EvKey KEnter []) -> (InsertChar '\n' cp, MoveCursor (0, line + 1), NoOp)
                   
                   VtyEvent (EvKey (KChar c) []) | c /= '\t' -> (InsertChar c cp, MoveCursor (column + 1, line), NoOp)
 
-                  -- TODO limit column-position to new line's length
-                  VtyEvent (EvKey KUp [])    -> (NoOp, MoveCursor (column, max 0 (line - 1)), NoOp)
-                  VtyEvent (EvKey KDown [])  -> (NoOp, MoveCursor (column, min lineCount (line + 1)), NoOp)
+                  VtyEvent (EvKey KUp [])    -> (NoOp, MoveCursor (min (Y.length $ getLine' (line - 1) contents) column, max 0 (line - 1)), NoOp)
+                  VtyEvent (EvKey KDown [])  -> (NoOp, MoveCursor (min (Y.length $ getLine' (line + 1) contents) column, min (Y.countNewLines contents) (line + 1)), NoOp)
 
                   VtyEvent (EvKey KLeft [])  -> (NoOp, MoveCursor (max 0 (column - 1), line), NoOp)
                   VtyEvent (EvKey KRight []) -> (NoOp, MoveCursor (min (Y.length $ getLine' line contents) (column + 1), line), NoOp)
