@@ -95,12 +95,12 @@ handleInEditor st e =
        Just Edit2 -> handleEventLensed st edit2 E.handleEditorEvent e
        Nothing -> return st
 
-initialState :: BChan (E.TokenizedEvent [GHC.Located GHC.Token]) -> MVar String -> (String -> IO ()) -> St
-initialState eventChannel lexerChannel sendSource =
+initialState :: (String -> IO ()) -> St
+initialState sendSource =
     St (F.focusRing [Edit1, Edit2])
        -- TODO build yiStr function for rendering Y.YiString
-       (E.editor Edit1 (str . Y.toString) "edit1" eventChannel lexerChannel sendSource)
-       (E.editor Edit2 (str . Y.toString) "edit2" eventChannel lexerChannel sendSource)
+       (E.editor Edit1 (str . Y.toString) "edit1" sendSource)
+       (E.editor Edit2 (str . Y.toString) "edit2" sendSource)
 
 theMap :: A.AttrMap
 theMap = A.attrMap V.defAttr
@@ -116,7 +116,7 @@ theApp =
     M.App { M.appDraw = drawUI
           , M.appChooseCursor = appCursor
           , M.appHandleEvent = appEvent
-          , M.appStartEvent = startEvent -- return
+          , M.appStartEvent = startEvent -- or: return
           , M.appAttrMap = const theMap
           }
 
@@ -125,9 +125,29 @@ startEvent st = do
   startEventLensed st edit1 E.startEvent
   startEventLensed st edit2 E.startEvent
 
+main :: IO ()
+main = do
+  eventChannel <- newBChan 1
+  lexerChannel <- liftIO newEmptyMVar
+
+  liftIO $ startGhc eventChannel lexerChannel
+
+  let callback = putMVar lexerChannel
+  trigger <- Fdeb.new Fdeb.Args { Fdeb.cb = callback, Fdeb.fold = \_ i -> i, Fdeb.init = "" }
+                      Fdeb.def { Fdeb.delay = 500000 }
+  let sendSource = Fdeb.send trigger
+
+  let initSt = initialState sendSource
+  st <- M.customMain (V.mkVty V.defaultConfig) (Just eventChannel) theApp initSt
+
+  putStrLn "In input 1 you entered:\n"
+  putStrLn $ Y.toString $ E.getEditContents $ st^.edit1
+  putStrLn "In input 2 you entered:\n"
+  putStrLn $ Y.toString $ E.getEditContents $ st^.edit2
+
 startGhc :: BChan (E.TokenizedEvent [Located Token]) -> MVar String -> IO ()
 startGhc eventChannel lexerChannel = do
-  threadId <- forkIO $ runGhc (Just libdir) $ do
+  _ <- forkIO $ runGhc (Just libdir) $ do
     flags <- getSessionDynFlags
     let lexLoc = mkRealSrcLoc (mkFastString "<interactive>") 1 1
     GMU.liftIO $ forever $ do
@@ -137,7 +157,7 @@ startGhc eventChannel lexerChannel = do
         case pResult of
 
           POk _ toks -> GMU.liftIO $ do
-            hPrint stderr $ "TOKENS\n" ++ concatMap showToken toks
+            hPutStrLn stderr $ "TOKENS\n" ++ concatMap showToken toks
             writeBChan eventChannel $ E.Tokens toks
 
           PFailed srcspan msg -> do
@@ -160,24 +180,3 @@ showTokenWithSource (loctok, src) =
   where
     tok = show $ unLoc loctok
     srcloc = show $ getLoc loctok
-
-
-main :: IO ()
-main = do
-  eventChannel <- newBChan 1
-  lexerChannel <- liftIO newEmptyMVar
-
-  liftIO $ startGhc eventChannel lexerChannel
-
-  -- TODO replace (hPrint stderr) with the real thing
-  trigger <- Fdeb.new Fdeb.Args { Fdeb.cb = hPrint stderr, Fdeb.fold = \_ i -> i, Fdeb.init = "" }
-                      Fdeb.def { Fdeb.delay = 500000 }
-  let sendSource = Fdeb.send trigger
-
-  let initSt = initialState eventChannel lexerChannel sendSource
-  st <- M.customMain (V.mkVty V.defaultConfig) (Just eventChannel) theApp initSt
-
-  putStrLn "In input 1 you entered:\n"
-  putStrLn $ Y.toString $ E.getEditContents $ st^.edit1
-  putStrLn "In input 2 you entered:\n"
-  putStrLn $ Y.toString $ E.getEditContents $ st^.edit2

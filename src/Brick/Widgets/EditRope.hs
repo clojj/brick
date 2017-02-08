@@ -43,22 +43,21 @@ import qualified Graphics.Vty as V
 import Brick.Types
 import Brick.Widgets.Core
 import Brick.AttrMap
-import Brick.BChan
 
 import GHC
 
 import Control.Monad.IO.Class
-import Control.Concurrent
 
 
 
-data TokenizedEvent a = Tokens a
+newtype TokenizedEvent a = Tokens a
   deriving Show
 
 type Loc = (Int, Int)
 
 data Operation =
-  InsertChar Char Loc
+  NoOp
+  | InsertChar Char Loc
   | DeleteChar Loc
   | MoveCursor Loc
   | Undo
@@ -66,12 +65,18 @@ data Operation =
 
 instance Show Operation where
     show op = case op of
-      InsertChar ch position -> "InsertChar " ++ [ch] ++ " " ++ show position
+      NoOp -> "NoOp"
+      InsertChar _ position -> "InsertChar " ++ show position
       DeleteChar position -> "DeleteChar " ++ show position
       MoveCursor d -> "MoveCursor " ++ show d
       Undo -> "Undo"
-      HandleTokens tokens -> "HandleTokens"
+      HandleTokens tokens -> "HandleTokens " ++ concatMap showToken tokens
 
+showToken :: GenLocated SrcSpan Token -> String
+showToken t = "\nsrcLoc: " ++ srcloc ++ "\ntok: " ++ tok ++ "\n"
+  where
+    srcloc = show $ getLoc t
+    tok = show $ unLoc t
 
 -- | Editor state.  Editors support the following events by default:
 --
@@ -91,9 +96,7 @@ data Editor n =
            , editorName :: n
            -- ^ The name of the editor
            , editCursor :: Loc
-           , editEventChannel :: BChan (TokenizedEvent [Located Token])
-           , editLexerChannel :: MVar String
-           -- TODO undo will be inverse of operation, depending on increment/decrement of index into this list
+           -- TODO undo will be inverse of operation, depending on increment/decrement of index into this list while un- or re-doing
            , editOperations :: [Operation]
            -- TODO render tokens
            , editTokens :: [Located Token]
@@ -109,11 +112,9 @@ editor ::
        -- ^ The content rendering function
        -> Y.YiString
        -- ^ The initial content
-       -> BChan (TokenizedEvent [Located Token])
-       -> MVar String
        -> (String -> IO ())
        -> Editor n
-editor name draw s eventChannel lexerChannel sendSource = Editor s draw name (0, 0) eventChannel lexerChannel [] [] sendSource
+editor name draw s sendSource = Editor s draw name (0, 0) [] [] sendSource
 
 -- TODO orphane instance !
 instance TextWidth Y.YiString where
@@ -165,70 +166,57 @@ deleteCh position = editContentsL %~ deleteChar position
           cTail = fromMaybe Y.empty $ Y.tail cAfter
       in lBefore <> (cBefore <> cTail)
 
+getLine' :: Int -> Y.YiString -> Y.YiString
+getLine' l = Y.takeWhile (/= '\n') . snd . Y.splitAtLine l
+
 handleEditorEvent :: BrickEvent n (TokenizedEvent [Located Token]) -> Editor n -> EventM n (Editor n)
 handleEditorEvent e ed = do
         let cp@(column, line) = ed ^. editCursorL
             contents = editContents ed
-            lineCount = (Y.countNewLines contents) + 1
-            currLine = (Y.lines' contents) !! line
-            ops = case e of
+            lineCount = Y.countNewLines contents
+            (contentOp, cursorOp, metaOp) = case e of
                   -- EvKey (KChar 'a') [MCtrl] -> Z.gotoBOL
                   -- EvKey (KChar 'e') [MCtrl] -> Z.gotoEOL
                   -- EvKey (KChar 'd') [MCtrl] -> Z.deleteChar
                   -- EvKey (KChar 'k') [MCtrl] -> Z.killToEOL
                   -- EvKey (KChar 'u') [MCtrl] -> Z.killToBOL
-                  -- EvKey KBS [] -> Z.deletePrevChar
 
-                  VtyEvent (EvKey (KChar 'z') [MCtrl]) -> [Undo]
+                  VtyEvent (EvKey (KChar 'z') [MCtrl]) -> (Undo, NoOp, NoOp)
 
-                  VtyEvent (EvKey KDel []) -> [DeleteChar cp]
+                  VtyEvent (EvKey KDel []) -> (DeleteChar cp, NoOp, NoOp)
+                  -- TODO delete only to column 0
+                  VtyEvent (EvKey KBS []) -> (DeleteChar (max 0 (column - 1), line), MoveCursor (max 0 (column - 1), line), NoOp)
                   
-                  VtyEvent (EvKey KEnter []) -> [InsertChar '\n' cp, MoveCursor (0, line + 1)]
+                  VtyEvent (EvKey KEnter []) -> (InsertChar '\n' cp, MoveCursor (0, line + 1), NoOp)
                   
-                  VtyEvent (EvKey (KChar c) []) | c /= '\t' -> [InsertChar c cp, MoveCursor (column + 1, line)]
+                  VtyEvent (EvKey (KChar c) []) | c /= '\t' -> (InsertChar c cp, MoveCursor (column + 1, line), NoOp)
 
-                  VtyEvent (EvKey KUp [])    -> [MoveCursor (column, max 0 (line - 1))]
-                  VtyEvent (EvKey KDown [])  -> [MoveCursor (column, min (lineCount - 1) (line + 1))]
+                  -- TODO limit column-position to new line's length
+                  VtyEvent (EvKey KUp [])    -> (NoOp, MoveCursor (column, max 0 (line - 1)), NoOp)
+                  VtyEvent (EvKey KDown [])  -> (NoOp, MoveCursor (column, min lineCount (line + 1)), NoOp)
 
-                  VtyEvent (EvKey KLeft [])  -> [MoveCursor (max 0 (column - 1), line)]
-                  VtyEvent (EvKey KRight []) -> [MoveCursor (min (Y.length currLine) (column + 1), line)]
+                  VtyEvent (EvKey KLeft [])  -> (NoOp, MoveCursor (max 0 (column - 1), line), NoOp)
+                  VtyEvent (EvKey KRight []) -> (NoOp, MoveCursor (min (Y.length $ getLine' line contents) (column + 1), line), NoOp)
                   
-                  AppEvent (Tokens tokens) -> [HandleTokens tokens]
+                  AppEvent (Tokens tokens) -> (NoOp, NoOp, HandleTokens tokens)
 
-                  _ -> []
+                  _ -> (NoOp, NoOp, NoOp)
 
-            contentsOps = filter modifiesContents ops
-            ed' = consOps contentsOps (applyComposed ops ed)
-
-        case ops of
-          -- TODO refactor.. only send changed contents to lexer
-          (DeleteChar _ : _) -> sendToLexer ed'
-          (InsertChar _ _ : _) -> sendToLexer ed'
-          _ -> return ed'
-
-        -- liftIO $ hPrint stderr (ed' ^. editOperationsL)
-        -- return ed'
-
-        where
-          modifiesContents :: Operation -> Bool
-          modifiesContents op =
-            case op of
-              InsertChar _ _ -> True
-              DeleteChar _ -> True
-              _ -> False
+            ed' = applyComposed [contentOp, cursorOp, metaOp] ed
+              
+        -- liftIO $ hPutStrLn stderr $ "operations: " ++ show (ed' ^. editOperationsL)
+        case contentOp of
+          NoOp -> return ed'
+          -- TODO call lexer only for actual changes to contents, not just change-operations
+          _ -> sendToLexer $ consOp contentOp ed'
 
 sendToLexer :: Editor n -> EventM n (Editor n)
 sendToLexer ed = do
-  -- TODO
   liftIO $ editSendSource ed $ (Y.toString . editContents) ed
-  -- TODO liftIO $ putMVar (editLexerChannel ed) ((Y.toString . editContents) ed)
   return ed
   
-consOps :: [Operation] -> Editor n -> Editor n
-consOps ops e =
-  case ops of
-    [] -> e
-    (op : _) -> e & editOperationsL %~ (\l -> op : l)
+consOp :: Operation -> Editor n -> Editor n
+consOp op e = e & editOperationsL %~ (\l -> op : l)
 
 applyComposed :: [Operation] -> Editor n -> Editor n
 applyComposed fs ed = foldl' foldOperation ed fs
@@ -236,22 +224,16 @@ applyComposed fs ed = foldl' foldOperation ed fs
 foldOperation :: Editor n -> Operation -> Editor n
 foldOperation e op =
   case op of
+    NoOp -> e & id
+    -- changing contents
     InsertChar ch position -> e & insertCh ch position
     DeleteChar position -> e & deleteCh position
-    MoveCursor d -> e & moveCursor d
     Undo -> e & id -- TODO
-    HandleTokens tokens -> e & handleTokens tokens -- TODO
+    -- changing cursor
+    MoveCursor d -> e & moveCursor d
+    -- changing meta
+    HandleTokens tokens -> e & handleTokens tokens
 
--- | Apply an editing operation to the editor's contents. Bear in mind
--- that you should only apply operations that operate on the
--- current line; the editor will only ever render the first line of
--- text.
--- applyEdit ::
---           -- ^ The editing transformation to apply
---           (Y.YiString -> Y.YiString)
---           -> Editor n
---           -> Editor n
--- applyEdit f e = e & editContentsL %~ f
 
 -- | The attribute assigned to the editor when it does not have focus.
 editAttr :: AttrName
@@ -277,8 +259,6 @@ renderEditor :: (Ord n, Show n)
              -- ^ The editor.
              -> Widget n
 renderEditor focus e =
-        -- TODO limit viewport like EditDemo.hs
-
     let cp@(column, line) = e ^. editCursorL
         contents = e ^. editContentsL
         toLeft = Y.take column $ snd $ Y.splitAtLine line contents
@@ -301,7 +281,7 @@ charAtCursor (column, line) s =
 
 startEvent :: Editor n -> EventM n (Editor n)
 startEvent ed = do
-  liftIO $ hPrint stderr $ "in startEvent: " ++ Y.toString (ed^.editContentsL)
+  liftIO $ hPutStrLn stderr $ "in startEvent: " ++ Y.toString (ed^.editContentsL)
   -- TODO remove: start lexer here is probably not viable... it should be shared among all editors for one stack-project
   -- lexerChannel <- liftIO newEmptyMVar
   -- let ed' = ed & (editLexerChannelL .~ Just lexerChannel)
